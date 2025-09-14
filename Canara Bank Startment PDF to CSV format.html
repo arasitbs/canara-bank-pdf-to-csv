@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bank Statement PDF → Excel (Canara Bank layout)</title>
+  <style>
+    :root{--bg:#0b1220;--fg:#eef2ff;--muted:#94a3b8;--accent:#60a5fa;--card:#111a2b;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444}
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--fg)}
+    header{padding:18px 20px;background:linear-gradient(90deg,#0b1220,#0d1629 60%,#0b1220)}
+    h1{margin:0;font-size:20px;letter-spacing:.2px}
+    .wrap{max-width:1100px;margin:0 auto;padding:18px}
+    .panel{background:var(--card);border:1px solid #1e293b;border-radius:16px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    label.btn,button{display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border-radius:12px;border:1px solid #1e293b;background:#0f192d;color:var(--fg);cursor:pointer}
+    button.primary{background:linear-gradient(90deg,#2563eb,#0891b2);border-color:transparent}
+    button:disabled{opacity:.45;cursor:not-allowed}
+    input[type=file]{display:none}
+    .hint{color:var(--muted);font-size:12px;margin-top:8px}
+    table{width:100%;border-collapse:collapse;margin-top:14px;border-radius:12px;overflow:hidden}
+    th,td{border-bottom:1px dashed #243247;padding:8px 10px;vertical-align:top}
+    th{position:sticky;top:0;background:#0e1830;z-index:1}
+    .badge{display:inline-block;padding:.15rem .5rem;border-radius:999px;font-size:12px;border:1px solid #334155}
+    .ok{color:var(--ok);border-color:var(--ok)}
+    .warn{color:var(--warn);border-color:var(--warn)}
+    .err{color:var(--err);border-color:var(--err)}
+    .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+    footer{opacity:.7;font-size:12px;margin-top:10px}
+    .kbd{border:1px solid #334155;border-bottom-width:2px;border-radius:7px;padding:2px 6px;background:#0b1428}
+    .pill{display:inline-flex;gap:6px;align-items:center;border:1px solid #1e293b;padding:6px 10px;border-radius:999px}
+    .spacer{flex:1}
+    .tests{margin-top:10px;background:#0c1730;border:1px solid #1f2b40;border-radius:12px;padding:10px}
+    .tests h3{margin:0 0 10px 0;font-size:14px;color:#cbd5e1}
+    .pass{color:#22c55e}.fail{color:#ef4444}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Bank Statement PDF → Excel (Canara Bank layout)</h1>
+    </div>
+  </header>
+  <div class="wrap">
+    <div class="panel">
+      <div class="row">
+        <label class="btn" for="pdfFile">📄 Choose PDF<input type="file" id="pdfFile" accept="application/pdf" /></label>
+        <button id="parseBtn" class="primary" disabled>Parse PDF</button>
+        <button id="downloadBtn" disabled>Download Excel</button>
+        <span id="status" class="pill"><span>⏳</span><span>Waiting for file…</span></span>
+        <span class="spacer"></span>
+        <button id="selfTestBtn" title="Run built-in unit tests">🧪 Run self‑tests</button>
+      </div>
+      <div class="hint">Designed for statements with columns: <span class="mono">Date, Particulars, CR/DR, Cheque No, Deposit, Withdrawal, Balance</span>. Handles multi‑line particulars and UPI/CR or UPI/DR patterns, ATM cash, IMPS, and interest lines.</div>
+      <div id="meta" class="grid" style="margin-top:12px;display:none"></div>
+      <div style="overflow:auto;max-height:55vh">
+        <table id="tbl" style="display:none">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Date</th>
+              <th>Particulars</th>
+              <th>Type</th>
+              <th>Cheque / Ref</th>
+              <th class="mono" style="text-align:right">Deposit</th>
+              <th class="mono" style="text-align:right">Withdrawal</th>
+              <th class="mono" style="text-align:right">Balance</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div id="tests" class="tests" style="display:none">
+        <h3>Parser Self‑Tests</h3>
+        <div id="testResults" class="mono"></div>
+      </div>
+      <footer>
+        <div>Tip: After parsing, press <span class="kbd">Ctrl</span>+<span class="kbd">F</span> to find a transaction quickly. You can also copy rows into Excel directly.</div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- External libs FIRST so pdfjsLib & XLSX are defined before our app code -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script>
+    // Configure worker if pdf.js loaded; otherwise fallback loader below will handle it.
+    if (window.pdfjsLib) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <script>
+  // ---- Robust loader & helpers ----
+  const $ = (sel)=>document.querySelector(sel);
+  const $$ = (sel)=>document.querySelectorAll(sel);
+  const statusEl = $('#status');
+  const metaEl = $('#meta');
+  const tbl = $('#tbl');
+  const tbody = tbl.querySelector('tbody');
+  const parseBtn = $('#parseBtn');
+  const downloadBtn = $('#downloadBtn');
+  const fileInput = $('#pdfFile');
+  const selfTestBtn = $('#selfTestBtn');
+
+  function statusMsg(msg, tone){
+    statusEl.querySelector('span:nth-child(2)').textContent = msg;
+    statusEl.style.borderColor = tone==='ok'? 'var(--ok)': tone==='err'? 'var(--err)' : tone==='warn'? 'var(--warn)':'#334155';
+  }
+
+  function loadScript(src){
+    return new Promise((resolve, reject)=>{
+      const s = document.createElement('script');
+      s.src = src; s.async = false; // preserve order
+      s.onload = ()=>resolve();
+      s.onerror = ()=>reject(new Error('Failed to load '+src));
+      document.head.appendChild(s);
+    });
+  }
+
+  async function ensureLibs(){
+    try{
+      if (!window.pdfjsLib){
+        await loadScript('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js');
+      }
+      if (window.pdfjsLib && (!pdfjsLib.GlobalWorkerOptions || !pdfjsLib.GlobalWorkerOptions.workerSrc)){
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+      }
+      if (!window.XLSX){
+        await loadScript('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
+      }
+    }catch(e){
+      throw e;
+    }
+  }
+
+  // ---- Main UI wiring ----
+  let parsedRows = [];
+  let openingBalance = null;
+  let accountMeta = {};
+
+  fileInput.addEventListener('change', ()=>{
+    statusMsg('📄 File selected. Ready to parse.','ok');
+    parseBtn.disabled = !fileInput.files.length;
+    downloadBtn.disabled = true;
+    tbl.style.display = 'none';
+    tbody.innerHTML = '';
+    metaEl.style.display = 'none';
+  });
+
+  parseBtn.addEventListener('click', async ()=>{
+    if (!fileInput.files.length) return;
+    reset();
+    try{
+      await ensureLibs();
+    }catch(err){
+      console.error(err);
+      statusMsg('❌ Could not load required libraries (pdf.js / xlsx). Check network & try again.','err');
+      return;
+    }
+
+    const file = fileInput.files[0];
+    try{
+      const arrayBuf = await file.arrayBuffer();
+      if (!window.pdfjsLib){
+        throw new Error('pdfjsLib still unavailable after load');
+      }
+      const pdf = await pdfjsLib.getDocument({data: arrayBuf}).promise;
+      statusMsg(`🔎 Parsing ${pdf.numPages} page(s)…`,'warn');
+
+      let fullText = '';
+      for (let p=1; p<=pdf.numPages; p++){
+        const page = await pdf.getPage(p);
+        const content = await page.getTextContent();
+        const pageText = content.items.map(i=>i.str).join('\n');
+        fullText += (p>1?'\n\n':'') + pageText;
+      }
+
+      fullText = normalizeText(fullText);
+
+      // Extract meta (account name, period, opening balance)
+      const periodMatch = fullText.match(/Statement for A\/c[^\n]*between\s+(\d{2}-[A-Za-z]{3}-\d{4}|\d{2}-\d{2}-\d{4})\s+and\s+(\d{2}-[A-Za-z]{3}-\d{4}|\d{2}-\d{2}-\d{4})/i);
+      const nameMatch = fullText.match(/Name\s+([A-Z .]+)/i);
+      const ifscMatch = fullText.match(/IFSC Code\s+([A-Z0-9]+)/i);
+      const openBalMatch = fullText.match(/Opening Balance\s*([0-9,]+\.[0-9]{2})/i);
+
+      accountMeta.period = periodMatch ? `${periodMatch[1]} → ${periodMatch[2]}` : '—';
+      accountMeta.name = nameMatch ? nameMatch[1].trim() : '—';
+      accountMeta.ifsc = ifscMatch ? ifscMatch[1].trim() : '—';
+      openingBalance = openBalMatch ? num(openBalMatch[1]) : null;
+
+      renderMeta();
+
+      const blocks = splitByDate(fullText);
+      parsedRows = [];
+      for (const b of blocks){
+        const row = parseBlock(b);
+        if (row) parsedRows.push(row);
+      }
+
+      renderTable(parsedRows);
+      statusMsg(`✅ Parsed ${parsedRows.length} transactions`,'ok');
+      downloadBtn.disabled = parsedRows.length === 0;
+    }catch(err){
+      console.error(err);
+      statusMsg('❌ Failed to parse PDF. See console for details.','err');
+    }
+  });
+
+  downloadBtn.addEventListener('click', ()=>{
+    if (!parsedRows.length) return;
+    const header = ['Date','Particulars','Type','Cheque / Ref','Deposit','Withdrawal','Balance'];
+    const data = parsedRows.map(r=>[
+      r.Date||'', r.Particulars||'', r.Type||'', r.ChequeRef||'',
+      (r.Deposit!==''? Number(r.Deposit):''),
+      (r.Withdrawal!==''? Number(r.Withdrawal):''),
+      (r.Balance!==null && r.Balance!==''? Number(r.Balance):'')
+    ]);
+
+    const wb = XLSX.utils.book_new();
+    const ws1 = XLSX.utils.aoa_to_sheet([header, ...data]);
+    XLSX.utils.book_append_sheet(wb, ws1, 'Transactions');
+    if (openingBalance!=null){
+      const ws2 = XLSX.utils.aoa_to_sheet([
+        ['Field','Value'],
+        ['Opening Balance', openingBalance],
+        ['Account Name', accountMeta.name||''],
+        ['Period', accountMeta.period||''],
+        ['IFSC', accountMeta.ifsc||'']
+      ]);
+      XLSX.utils.book_append_sheet(wb, ws2, 'Meta');
+    }
+
+    XLSX.writeFile(wb, 'BankStatement.xlsx');
+  });
+
+  // ---- Self tests ----
+  selfTestBtn.addEventListener('click', ()=>{
+    $('#tests').style.display = '';
+    const cases = getTestCases();
+    const out = [];
+    for (const tc of cases){
+      const got = parseBlock(tc.input);
+      const pass = deepEqual(stripFmt(got), stripFmt(tc.expect));
+      out.push((pass? '✅':'❌')+ ' '+ tc.name + (pass? '':'\n   expected: '+JSON.stringify(tc.expect)+'\n   got     : '+JSON.stringify(got)));
+    }
+    $('#testResults').textContent = out.join('\n');
+  });
+
+  function getTestCases(){
+    return [
+      { // CR via UPI/CR
+        name: 'UPI credit basic',
+        input: `01-04-2024\nUPI/CR 2233445566 From YBL/UPI\nChq: \n 1,000.00 10,000.00`,
+        expect: {Date:'01-04-2024', Particulars:'UPI/CR 2233445566 From YBL/UPI', Type:'CR', ChequeRef:'', Deposit:1000, Withdrawal:'', Balance:10000}
+      },
+      { // DR via UPI/DR
+        name: 'UPI debit basic',
+        input: `02-04-2024\nUPI/DR 7788990011 To HDF/UPI\nChq: \n 500.00 9,500.00`,
+        expect: {Date:'02-04-2024', Particulars:'UPI/DR 7788990011 To HDF/UPI', Type:'DR', ChequeRef:'', Deposit:'', Withdrawal:500, Balance:9500}
+      },
+      { // ATM CASH DR
+        name: 'ATM CASH withdrawal',
+        input: `03-04-2024\nATM CASH WITHDRAWAL - CNRB ATM\nChq: \n 2,000.00 7,500.00`,
+        expect: {Date:'03-04-2024', Particulars:'ATM CASH WITHDRAWAL - CNRB ATM', Type:'DR', ChequeRef:'', Deposit:'', Withdrawal:2000, Balance:7500}
+      },
+      { // Interest credit
+        name: 'Interest credit',
+        input: `30-06-2024\nSBINT CREDIT Q1\nChq: \n 123.45 12,345.67`,
+        expect: {Date:'30-06-2024', Particulars:'SBINT CREDIT Q1', Type:'CR', ChequeRef:'', Deposit:123.45, Withdrawal:'', Balance:12345.67}
+      },
+      { // With Cheque/Ref line
+        name: 'Cheque ref capture',
+        input: `10-04-2024\nIMPS-CR FROM 98XXXXXX12\nChq: 123456\n 1,111.00 13,456.00`,
+        expect: {Date:'10-04-2024', Particulars:'IMPS-CR FROM 98XXXXXX12', Type:'CR', ChequeRef:'123456', Deposit:1111, Withdrawal:'', Balance:13456}
+      }
+    ];
+  }
+
+  function deepEqual(a,b){
+    return JSON.stringify(a)===JSON.stringify(b);
+  }
+  function stripFmt(o){
+    if (!o) return o;
+    const c = {...o};
+    ['Deposit','Withdrawal','Balance'].forEach(k=>{ if (c[k]!=='' && c[k]!=null) c[k]=Number(c[k]); });
+    return c;
+  }
+
+  // ---- Parsing helpers ----
+  function reset(){
+    parsedRows = [];
+    openingBalance = null;
+    accountMeta = {};
+    tbody.innerHTML = '';
+    tbl.style.display = 'none';
+    downloadBtn.disabled = true;
+    metaEl.style.display = 'none';
+  }
+
+  function renderMeta(){
+    metaEl.innerHTML = '';
+    const items = [
+      ['Account Name', accountMeta.name||'—'],
+      ['Period', accountMeta.period||'—'],
+      ['IFSC', accountMeta.ifsc||'—'],
+      ['Opening Balance', openingBalance!=null? fmt(openingBalance):'—']
+    ];
+    for (const [k,v] of items){
+      const div = document.createElement('div');
+      div.className = 'panel';
+      div.style.padding = '10px 12px';
+      div.style.borderRadius = '12px';
+      div.style.background = '#0c1730';
+      div.style.border = '1px solid #1f2b40';
+      div.innerHTML = `<div class="hint" style="margin:0 0 4px 0">${k}</div><div class="mono">${v}</div>`;
+      metaEl.appendChild(div);
+    }
+    metaEl.style.display = 'grid';
+  }
+
+  function normalizeText(t){
+    return String(t)
+      .replace(/\f/g,'')
+      .replace(/\u0000/g,'')
+      .replace(/\s+page \d+\s+/gi,'')
+      .replace(/\s{2,}/g,' ')
+      .replace(/\s*(\d{2}-\d{2}-\d{4})\s*/g, '\n$1\n');
+  }
+
+  function splitByDate(text){
+    const parts = text.split(/\n(?=\d{2}-\d{2}-\d{4}\b)/g);
+    return parts.filter(p=>/^\d{2}-\d{2}-\d{4}/.test(p));
+  }
+
+  function parseBlock(block){
+    const lines = block.split(/\n+/).map(s=>s.trim()).filter(Boolean);
+    if (!/^\d{2}-\d{2}-\d{4}$/.test(lines[0])) return null;
+    const date = lines[0];
+
+    let chq = '';
+    const chqIdx = lines.findIndex(l=>/^Chq:\s*/i.test(l));
+    if (chqIdx !== -1){
+      chq = lines[chqIdx].replace(/^Chq:\s*/i,'').trim();
+    }
+
+    const particularsLines = lines.slice(1, chqIdx===-1? lines.length : chqIdx)
+      .filter(l=>!/^Date\s+Particulars/i.test(l))
+      .filter(l=>!/^Deposits\s+Withdrawals\s+Balance/i.test(l));
+    let particulars = particularsLines.join(' ').replace(/\s{2,}/g,' ').trim();
+
+    let amount=null, balance=null;
+    for (let i=lines.length-1;i>=0;i--){
+      const m = lines[i].match(/([0-9,]+\.[0-9]{2})\s+([0-9,]+\.[0-9]{2})$/);
+      if (m){ amount=num(m[1]); balance=num(m[2]); break; }
+    }
+    if (amount==null && balance==null){
+      const joined = lines.slice(-3).join(' ');
+      const m2 = joined.match(/([0-9,]+\.[0-9]{2})\s+([0-9,]+\.[0-9]{2})/);
+      if (m2){ amount=num(m2[1]); balance=num(m2[2]); }
+    }
+
+    let type = inferType(particulars);
+    let deposit = '', withdrawal = '';
+    if (type==='CR') deposit = amount!=null?amount:''; else if (type==='DR') withdrawal = amount!=null?amount:'';
+
+    return {Date: date, Particulars: particulars, Type: type, ChequeRef: chq, Deposit: deposit, Withdrawal: withdrawal, Balance: balance};
+  }
+
+  function inferType(text){
+    const t = (text||'').toUpperCase();
+    if (/\bIMPS-CR\b|\bMOB-IMPS-CR\b|\bINET-IMPS-CR\b|\b SBINT\b|\b\/CR\b|\b CREDIT\b/.test(t)) return 'CR';
+    if (/\b ATM CASH\b|\b\/DR\b|\b DEBIT\b|\b PYTM\b/.test(t)) return 'DR';
+    if (/PAYMENT/.test(t) && /YBL|HDF|SBI|AXI|ICI|FDRL|UTIB|KKBK|CNRB|IDIB|IOBA|KARB|KVBL|UBIN|YESB/i.test(t)){
+      return /\/CR\b/.test(t)?'CR':'CR';
+    }
+    return '—';
+  }
+
+  function num(s){
+    return parseFloat(String(s).replace(/[,₹]/g,'').trim());
+  }
+
+  function fmt(n){
+    if (n==null || n==='') return '';
+    return new Intl.NumberFormat('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2}).format(Number(n));
+  }
+
+  function renderTable(rows){
+    tbl.style.display = '';
+    tbody.innerHTML = '';
+    rows.forEach((r,idx)=>{
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="mono">${idx+1}</td>
+        <td class="mono">${r.Date||''}</td>
+        <td>${escapeHtml(r.Particulars||'')}</td>
+        <td><span class="badge ${r.Type==='CR'?'ok':r.Type==='DR'?'err':'warn'}">${r.Type||''}</span></td>
+        <td class="mono">${r.ChequeRef||''}</td>
+        <td class="mono" style="text-align:right">${fmt(r.Deposit)}</td>
+        <td class="mono" style="text-align:right">${fmt(r.Withdrawal)}</td>
+        <td class="mono" style="text-align:right">${fmt(r.Balance)}</td>`;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function escapeHtml(s){
+    return s.replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  }
+  </script>
+</body>
+</html>
